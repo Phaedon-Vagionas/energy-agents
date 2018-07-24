@@ -11,6 +11,9 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.List;
+import java.util.function.Function;
+import java.util.function.IntToDoubleFunction;
 
 /**
  * Builds CitySimulations from database input files.
@@ -74,6 +77,7 @@ public class ScenarioBuilder {
     public final static String TEMPERATURE_DATA_POINT_NAME = "temperature";
     public final static String AVERAGE_TEMPERATURE_DATA_POINT_NAME = "averageTemperature";
     public final static String ACTIVITY_DATA_POINT_NAME = "activity";
+    public final static String ACTIVITY_COUNTS_DATA_POINT_NAME = "activityCounts";
     public final static String THERMAL_POWER_DATA_POINT_NAME = "thermalPower";
     public final static String AVERAGE_THERMAL_POWER_DATA_POINT_NAME = "averageThermalPower";
 
@@ -140,8 +144,9 @@ public class ScenarioBuilder {
                 heatingControlStrategyFactory);
         Map<Integer, DwellingDistrictReference> districtReferences = readDistricts(con, dwellingReferences);
         Map<Integer, PersonReference> peopleReferences = readPeople(con, dwellingReferences, parameters);
+        Map<Integer, PersonDistrictReference> pdistrictReferences = readPdistricts(con, peopleReferences);
         DataLoggerReference dataLoggerReference = createDataLogger(dwellingReferences, peopleReferences,
-                districtReferences, parameters, inputPath, outputPath);
+                districtReferences, pdistrictReferences, parameters, inputPath, outputPath);
         return new CitySimulation(
                 dwellingReferences.values(),
                 peopleReferences.values(),
@@ -248,6 +253,44 @@ public class ScenarioBuilder {
         }
         return districts;
     }
+
+    private static Map<Integer, PersonDistrictReference> readPdistricts(Connection conn,
+                                                                         Map<Integer, PersonReference> people)
+            throws SQLException {
+        Map<Integer, Integer> dwellingsToDistrictId = new HashMap<>();
+        Statement stat2 = conn.createStatement();
+        ResultSet rs2 = stat2.executeQuery(String.format("select * from %s;", SQL_TABLES_DWELLINGS));
+        while (rs2.next()) {
+            int dwellingId = rs2.getInt(SQL_COLUMNS_DW_INDEX);
+            int districtId = rs2.getInt(SQL_COLUMNS_DW_DISTRICT_ID);
+            dwellingsToDistrictId.put(dwellingId, districtId);
+        }
+        rs2.close();
+
+        Map<Integer, List<Integer>> districtsToPersonId = new HashMap<>();
+        Statement stat = conn.createStatement();
+        ResultSet rs = stat.executeQuery(String.format("select * from %s;", SQL_TABLES_PEOPLE));
+        while (rs.next()) {
+            int personId = rs.getInt(SQL_COLUMNS_PPL_INDEX);
+            int dwellingId = rs.getInt(SQL_COLUMNS_PPL_DWELLING_ID);
+            int districtId = dwellingsToDistrictId.get(dwellingId);
+            if(!districtsToPersonId.keySet().contains(districtId)){
+                districtsToPersonId.put(districtId, new LinkedList<>());
+            }
+            districtsToPersonId.get(districtId).add(personId);
+        }
+        rs.close();
+
+        Map<Integer, PersonDistrictReference> pdistricts = new HashMap<>();
+        for(Map.Entry<Integer, List<Integer>> entry : districtsToPersonId.entrySet()){
+            List<PersonReference> peopleInDistrict = new LinkedList<>();
+            for(Integer i : entry.getValue()){
+                peopleInDistrict.add(people.get(i));
+            }
+            pdistricts.put(entry.getKey(), new PersonDistrictReference(new PersonDistrict(new HashSet<>(peopleInDistrict))));
+        }
+        return pdistricts;
+}
 
     private static Map<Integer, PersonReference> readPeople(Connection conn, Map<Integer, DwellingReference> dwellings,
                                                     SimulationParameter parameters) throws SQLException, IOException {
@@ -379,6 +422,7 @@ public class ScenarioBuilder {
     private static DataLoggerReference createDataLogger(Map<Integer, DwellingReference> dwellings,
                                                         Map<Integer, PersonReference> people,
                                                         Map<Integer, DwellingDistrictReference> districts,
+                                                        Map<Integer, PersonDistrictReference> pdistricts,
                                                         SimulationParameter parameters,
                                                         String inputPath, String outputPath) {
         Set<DataPoint> dataPoints = new HashSet<>();
@@ -417,11 +461,21 @@ public class ScenarioBuilder {
             }
         }
         if (parameters.logActivity) {
-            dataPoints.add(new DataPoint<>(
-                    ACTIVITY_DATA_POINT_NAME,
-                    people,
-                    (PersonReference::getCurrentActivity)
-            ));
+            if (parameters.logAggregated) {
+                dataPoints.add(new DataPoint<>(
+                        ACTIVITY_COUNTS_DATA_POINT_NAME,
+                        pdistricts,
+                        (pdistrict -> pdistrict.getAllCurrentActivities()
+                                .thenApply(Map::values)
+                                .thenApply(values -> values.stream().collect(Collectors.groupingBy(Function.identity(),Collectors.counting())))) 
+                ));
+            } else {
+                dataPoints.add(new DataPoint<>(
+                        ACTIVITY_DATA_POINT_NAME,
+                        people,
+                        (PersonReference::getCurrentActivity)
+                ));
+            }
         }
         DataLogger dataLogger = new DataLogger(
                 dataPoints.stream().map(DataPointReference::new).collect(Collectors.toSet()),
