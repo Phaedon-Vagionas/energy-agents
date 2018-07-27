@@ -1,2 +1,5 @@
 # IntelliJ
 *.iml
+
+energy-agents/target/
+simulation-framework/target/
