@@ -11,6 +11,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Collector;
 import java.util.List;
 import java.util.function.Function;
 import java.util.function.IntToDoubleFunction;
@@ -80,6 +81,7 @@ public class ScenarioBuilder {
     public final static String ACTIVITY_COUNTS_DATA_POINT_NAME = "activityCounts";
     public final static String THERMAL_POWER_DATA_POINT_NAME = "thermalPower";
     public final static String AVERAGE_THERMAL_POWER_DATA_POINT_NAME = "averageThermalPower";
+    public final static String STD_THERMAL_POWER_DATA_POINT_NAME = "stdThermalPower";
 
     public final static ZoneOffset TIME_ZONE = ZoneOffset.UTC;
 
@@ -419,6 +421,61 @@ public class ScenarioBuilder {
         return factories.get(0); // there could be more, but at the moment don't care
     }
 
+
+// Class DoubleStatistics
+// sourced from https://stackoverflow.com/questions/36263352/java-streams-standard-deviation/36264148#36264148
+// code by Tunaki
+static class DoubleStatistics extends DoubleSummaryStatistics {
+
+    private double sumOfSquare = 0.0d;
+    private double sumOfSquareCompensation; // Low order bits of sum
+    private double simpleSumOfSquare; // Used to compute right sum for
+                                        // non-finite inputs
+
+    @Override
+    public void accept(double value) {
+        super.accept(value);
+        double squareValue = value * value;
+        simpleSumOfSquare += squareValue;
+        sumOfSquareWithCompensation(squareValue);
+    }
+
+    public DoubleStatistics combine(DoubleStatistics other) {
+        super.combine(other);
+        simpleSumOfSquare += other.simpleSumOfSquare;
+        sumOfSquareWithCompensation(other.sumOfSquare);
+        sumOfSquareWithCompensation(other.sumOfSquareCompensation);
+        return this;
+    }
+
+    private void sumOfSquareWithCompensation(double value) {
+        double tmp = value - sumOfSquareCompensation;
+        double velvel = sumOfSquare + tmp; // Little wolf of rounding error
+        sumOfSquareCompensation = (velvel - sumOfSquare) - tmp;
+        sumOfSquare = velvel;
+    }
+
+    public double getSumOfSquare() {
+        double tmp = sumOfSquare + sumOfSquareCompensation;
+        if (Double.isNaN(tmp) && Double.isInfinite(simpleSumOfSquare)) {
+            return simpleSumOfSquare;
+        }
+        return tmp;
+    }
+
+    public final double getStandardDeviation() {
+        long count = getCount();
+        double sumOfSquare = getSumOfSquare();
+        double average = getAverage();
+        return count > 0 ? Math.sqrt((sumOfSquare - count * Math.pow(average, 2)) / (count - 1)) : 0.0d;
+    }
+
+    public static Collector<Double, ?, DoubleStatistics> collector() {
+        return Collector.of(DoubleStatistics::new, DoubleStatistics::accept, DoubleStatistics::combine);
+    }
+}
+// ends here
+
     private static DataLoggerReference createDataLogger(Map<Integer, DwellingReference> dwellings,
                                                         Map<Integer, PersonReference> people,
                                                         Map<Integer, DwellingDistrictReference> districts,
@@ -451,6 +508,13 @@ public class ScenarioBuilder {
                         (district -> district.getAllCurrentThermalPowers()
                                 .thenApply(Map::values)
                                 .thenApply(values -> values.stream().mapToDouble(Double::doubleValue).average().getAsDouble()))
+                ));
+                dataPoints.add(new DataPoint<>(
+                        STD_THERMAL_POWER_DATA_POINT_NAME,
+                        districts,
+                        (district -> district.getAllCurrentThermalPowers()
+                                .thenApply(Map::values)
+                                .thenApply(values -> values.stream().map(Double::doubleValue).collect(DoubleStatistics.collector()).getStandardDeviation()))
                 ));
             } else {
                 dataPoints.add(new DataPoint<>(
